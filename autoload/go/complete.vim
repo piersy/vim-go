@@ -42,6 +42,48 @@ fu! s:gocodeShellescape(arg)
         let &shellslash = ssl_save
     endtry
 endf
+fu! s:goPackagesCompletion()
+    "Check if we are in a string that maps to an import path"
+    let currLine = getline('.')
+    let slashIndex = -1
+    let dblquoteIndex = -1
+    let currCol = col('.')
+
+    "Search backwards for the double quote and slash
+    for i in range(currCol, 0, -1)
+        if currLine[i] ==# '/' && slashIndex ==# -1
+            let slashIndex = i
+        endif
+        if currLine[i] ==# '"'
+            let dblquoteIndex = i
+            break
+        endif
+    endfor
+    "If we found no quote then def is not a package
+    if dblquoteIndex ==# -1
+        return [0, []]
+    endif
+    let packagePrefix = strpart(currLine, dblquoteIndex+1, slashIndex - dblquoteIndex -1)
+    let packageNamePart = strpart(currLine, slashIndex+1, currCol - slashIndex - 1)
+    let packageBaseDir = fnameescape($GOPATH.'/src/'.packagePrefix)
+    "The directory does not exist so no completion to do
+    if !isdirectory(packageBaseDir)
+        return [0, []]
+    endif
+    let current_dir = getcwd()
+    execute 'cd' .' '. packageBaseDir
+    let s:cmd = 'go list ./... | grep -v "found packages"'
+    let packageList  = split(system(s:cmd))
+    let pattern = '^'.packagePrefix.'/'.packageNamePart
+    call filter(packageList, 'match(v:val, pattern) ==# 0')
+    execute 'cd' . fnameescape(current_dir)
+    for i in range(len(packageList))
+        let s:p = packageList[i]
+        let name = substitute(s:p, '^.*/', "", "")
+        let packageList[i] = {'word': strpart(s:p, len(packagePrefix), len(s:p) - len(packagePrefix)).'"', 'abbr' : name,  'menu' : s:p}
+    endfor
+    return [len(packageNamePart)-1, packageList]
+endf
 
 fu! s:gocodeCommand(cmd, preargs, args)
     for i in range(0, len(a:args) - 1)
@@ -60,9 +102,7 @@ fu! s:gocodeCommand(cmd, preargs, args)
     " GOPATHS: https://github.com/nsf/gocode/issues/239
     let old_gopath = $GOPATH
     let $GOPATH = go#path#Detect()
-
     let result = s:system(printf('%s %s %s %s', s:gocodeShellescape(bin_path), join(a:preargs), s:gocodeShellescape(a:cmd), join(a:args)))
-
     let $GOPATH = old_gopath
 
     if v:shell_error != 0
@@ -154,15 +194,39 @@ endfunction
 fu! go#complete#Complete(findstart, base)
     "findstart = 1 when we need to get the text length
     if a:findstart == 1
-        execute "silent let g:gocomplete_completions = " . s:gocodeAutocomplete()
-        return col('.') - g:gocomplete_completions[0] - 1
-        "findstart = 0 when we need to return the list of completions
-    else
-        let s = getline(".")[col('.') - 1]
-        if s =~ '[(){}\{\}]'
-            return map(copy(g:gocomplete_completions[1]), 's:trim_bracket(v:val)')
+        "echom type(g:go_list_package_completions)
+        if exists("g:go_list_package_completions")
+            let s:temp = s:goPackagesCompletion()
+            echom type(s:temp)
         endif
-        return g:gocomplete_completions[1]
+        let g:go_list_package_completions = s:goPackagesCompletion()
+        echom type(g:go_list_package_completions) ."completionstype"
+        if len(g:go_list_package_completions[1]) ==# 0 
+            execute "silent let g:gocomplete_completions = " . s:gocodeAutocomplete()
+            "current cursor position minus the first element of completions minus 1
+            "echom string(g:gocomplete_completions)
+            return col('.') - g:gocomplete_completions[0] - 1
+        else
+   " "move cursor to end of lien to get rid of trailing rubbish
+   " let s:pos = getpos('.')
+   " let s:pos[2] = len(currLine)-1
+   " call setpos('.', s:pos)
+            "echom string(g:go_list_package_completions)
+            execute 'normal D'
+            return col('.') - g:go_list_package_completions[0] -1
+        endif
+    else
+        echom "calling"
+        "findstart = 0 when we need to return the list of completions
+        if len(g:go_list_package_completions[1]) ==# 0 
+            let s = getline(".")[col('.') - 1]
+            if s =~ '[(){}\{\}]'
+                return map(copy(g:gocomplete_completions[1]), 's:trim_bracket(v:val)')
+            endif
+            return g:gocomplete_completions[1]
+        else
+            return g:go_list_package_completions[1]
+        endif
     endif
 endf
 
