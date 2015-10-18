@@ -42,9 +42,15 @@ fu! s:gocodeShellescape(arg)
         let &shellslash = ssl_save
     endtry
 endf
-fu! s:goPackagesCompletion()
+
+"Determines if what is on the current line could be a package by searching for the
+"beginning double quote, takes the text from the quote up to the last forward
+"slash and checks to see if that is a package directory under the go path.
+"
+"
+fu! s:goPackagesCompletion(line)
     "Check if we are in a string that maps to an import path"
-    let currLine = getline('.')
+    let currLine = a:line
     let slashIndex = -1
     let dblquoteIndex = -1
     let currCol = col('.')
@@ -59,32 +65,72 @@ fu! s:goPackagesCompletion()
             break
         endif
     endfor
-    "If we found no quote then def is not a package
+
+    "If we found no quote then this cannot be a package import
     if dblquoteIndex ==# -1
         return [0, []]
     endif
-    let packagePrefix = strpart(currLine, dblquoteIndex+1, slashIndex - dblquoteIndex -1)
-    let packageNamePart = strpart(currLine, slashIndex+1, currCol - slashIndex - 1)
-    let packageBaseDir = fnameescape($GOPATH.'/src/'.packagePrefix)
-    "The directory does not exist so no completion to do
-    if !isdirectory(packageBaseDir)
+
+    "Package dir is everything up to the forward slash
+    "If there is no slash in the path then we may have just the beginning part of a package
+    "or it could be a whole directory minus finishing slash we dont need to worry about that
+    "case except for a quicker failure, we can just treat it as a prefix and use it to filter
+    "results from the goroot gopath 
+
+    if slashIndex ==# -1
+        let packagDir = ''
+        let packageNamePart = strpart(currLine, dblquoteIndex+1, currCol - dblquoteIndex-1)
+    else 
+        "the part typed after the forward slash - used to narrow down the possible candidates
+        let packagDir = strpart(currLine, dblquoteIndex+1, slashIndex - dblquoteIndex -1)
+        let packageNamePart = strpart(currLine, slashIndex, currCol - slashIndex)
+    endif
+
+    "Construct path to search for packages
+    let gopathPackageBaseDir = fnameescape($GOPATH.'/src/'.packagDir)
+    let gorootPackageBaseDir = fnameescape($GOROOT.'/src/'.packagDir)
+    "No directories found means no possibility of any packages for those paths
+    if !isdirectory(gopathPackageBaseDir) && !isdirectory(gorootPackageBaseDir) 
         return [0, []]
     endif
+
+    "Store the current dir
     let current_dir = getcwd()
-    execute 'cd' .' '. packageBaseDir
-    let s:cmd = 'go list ./... | grep -v "found packages"'
-    let packageList  = split(system(s:cmd))
-    let pattern = '^'.packagePrefix.'/'.packageNamePart
-    call filter(packageList, 'match(v:val, pattern) ==# 0')
+    "We use this list to build up lists of packages from differne paths
+    let packageList = []
+
+    "pattern to filter out all packages with non mathing prefix
+    if len(packagDir) > 0
+        let pattern = '^'.packagDir.packageNamePart
+    else
+        let pattern = '^'.packageNamePart
+    endif
+
+    let packageList += s:findPackagesInDir(gopathPackageBaseDir, pattern)
+    let packageList += s:findPackagesInDir(gorootPackageBaseDir, pattern)
+    "Return to curren dir
     execute 'cd' . fnameescape(current_dir)
+
+    "Iterate over the list converting each entry into a dictionary suitable for omnicomplete
     for i in range(len(packageList))
         let s:p = packageList[i]
         let name = substitute(s:p, '^.*/', "", "")
-        let packageList[i] = {'word': strpart(s:p, len(packagePrefix), len(s:p) - len(packagePrefix)).'"', 'abbr' : name,  'menu' : s:p}
+        let packageList[i] = {'word': strpart(s:p, len(packagDir), len(s:p) - len(packagDir)).'"', 'abbr' : name,  'menu' : s:p}
     endfor
-    return [len(packageNamePart)-1, packageList]
-endf
 
+    return [len(packageNamePart), packageList]
+endf
+"Executes go list in the given path returns the results in a list filtered with the given pattern
+fu! s:findPackagesInDir(dir, matchPattern)
+    if !isdirectory(a:dir) 
+         return []
+    endif
+    execute 'cd' .' '. a:dir
+    let s:cmd = 'go list ./... | grep -v "found packages"'
+    let packageList  = split(system(s:cmd))
+    call filter(packageList, 'match(v:val, a:matchPattern) ==# 0')
+    return packageList
+endf
 fu! s:gocodeCommand(cmd, preargs, args)
     for i in range(0, len(a:args) - 1)
         let a:args[i] = s:gocodeShellescape(a:args[i])
@@ -191,32 +237,35 @@ function! s:trim_bracket(val)
     return a:val
 endfunction
 
+"This function combines two types of completion.
+"Package completion provided via go list
+"gocode completion provided via godcode
+"Its quick to see if there are possible package completions
+"So that is cheked first and if non are found gocode completion
+"is invoked
 fu! go#complete#Complete(findstart, base)
     "findstart = 1 when we need to get the text length
     if a:findstart == 1
-        "echom type(g:go_list_package_completions)
-        if exists("g:go_list_package_completions")
-            let s:temp = s:goPackagesCompletion()
-            echom type(s:temp)
-        endif
-        let g:go_list_package_completions = s:goPackagesCompletion()
-        echom type(g:go_list_package_completions) ."completionstype"
+        let s:line = getline('.')
+        let s:col = col('.')
+
+        let g:go_list_package_completions = s:goPackagesCompletion(s:line)
         if len(g:go_list_package_completions[1]) ==# 0 
             execute "silent let g:gocomplete_completions = " . s:gocodeAutocomplete()
-            "current cursor position minus the first element of completions minus 1
-            "echom string(g:gocomplete_completions)
-            return col('.') - g:gocomplete_completions[0] - 1
+            return s:col -  g:gocomplete_completions[0] - 1
         else
-   " "move cursor to end of lien to get rid of trailing rubbish
-   " let s:pos = getpos('.')
-   " let s:pos[2] = len(currLine)-1
-   " call setpos('.', s:pos)
-            "echom string(g:go_list_package_completions)
-            execute 'normal D'
-            return col('.') - g:go_list_package_completions[0] -1
+            "If we are not at the end of the line delete remainder
+            "This ensures that the completion has the 
+            "effect of overwriting the the remainder of the line
+            "deleting also deletes the current char so affects the column we return
+            if s:col < len(s:line) 
+                execute 'normal D'
+                return s:col - g:go_list_package_completions[0]
+            else
+                return s:col - g:go_list_package_completions[0] -1
+            endif
         endif
     else
-        echom "calling"
         "findstart = 0 when we need to return the list of completions
         if len(g:go_list_package_completions[1]) ==# 0 
             let s = getline(".")[col('.') - 1]
