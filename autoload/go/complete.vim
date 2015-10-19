@@ -56,7 +56,11 @@ fu! s:goPackagesCompletion(line)
     let currCol = col('.')
 
     "Search backwards for the double quote and slash
+    "Fail fast if a space is found
     for i in range(currCol, 0, -1)
+        if currLine[i] ==# ' '
+            return [0, []]
+        endif
         if currLine[i] ==# '/' && slashIndex ==# -1
             let slashIndex = i
         endif
